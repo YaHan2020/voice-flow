@@ -15,24 +15,26 @@ export default {
 
     try {
       const body = await request.json() as any;
-      console.log("收到请求类型:", body.type); // [日志] 打印请求类型
+      // [日志] 打印收到的请求类型，确认飞书真的发了消息过来
+      console.log("收到请求类型:", body.type); 
 
-      // 2. 飞书验证
+      // 2. 飞书验证 (握手逻辑)
       if (body.type === 'url_verification') {
         if (body.token !== env.LARK_VERIFICATION_TOKEN) return new Response('Invalid Token', { status: 403 });
         return new Response(JSON.stringify({ challenge: body.challenge }), { headers: { 'Content-Type': 'application/json' } });
       }
 
-      // 3. 处理消息
+      // 3. 处理消息事件
       if (body.header && body.header.event_type === 'im.message.receive_v1') {
         const messageId = body.event.message.message_id;
         const chatId = body.event.message.chat_id;
         const msgType = body.event.message.message_type;
         const content = JSON.parse(body.event.message.content);
 
-        console.log(`收到消息: ${msgType} | ID: ${messageId}`); // [日志]
+        // [日志] 确认解析出了消息ID和类型
+        console.log(`收到消息: ${msgType} | ID: ${messageId}`); 
 
-        // 进入后台处理
+        // 进入后台处理 (关键！)
         ctx.waitUntil(handleMessage(env, messageId, chatId, msgType, content));
         return new Response('OK', { status: 200 });
       }
@@ -46,13 +48,14 @@ export default {
   },
 };
 
+// --- 后台处理逻辑 (这里是我们要抓Bug的地方) ---
 async function handleMessage(env: Env, messageId: string, chatId: string, msgType: string, content: any) {
-  console.log("开始后台处理..."); // [日志]
+  console.log("🚀 开始后台处理..."); 
 
   // 1. 获取 Token
   const token = await getLarkToken(env.LARK_APP_ID, env.LARK_APP_SECRET);
   if (!token) {
-    console.error("❌ 获取 Token 失败！请检查 App ID 和 Secret");
+    console.error("❌ 获取 Token 失败！请检查 App ID 和 Secret 是否正确，或者企业是否被封禁。");
     return;
   }
   console.log("✅ 获取 Token 成功");
@@ -69,22 +72,27 @@ async function handleMessage(env: Env, messageId: string, chatId: string, msgTyp
   await replyLark(token, messageId, replyText);
 }
 
+// --- 获取飞书 Token ---
 async function getLarkToken(appId: string, appSecret: string) {
-  console.log(`正在请求 Token, AppID: ${appId}`); // [日志] 不要打印 Secret
+  console.log(`正在请求 Token... (AppID: ${appId})`); 
+  
   const res = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ "app_id": appId, "app_secret": appSecret })
   });
+  
   const data: any = await res.json();
   
+  // [关键日志] 如果这里报错，它会告诉我们具体原因 (比如 code: 10003)
   if (data.code !== 0) {
-    console.error("❌ 飞书 Token 报错:", JSON.stringify(data)); // [关键] 看看飞书返回了什么错误
+    console.error("❌ 飞书 Token 报错详情:", JSON.stringify(data)); 
     return null;
   }
   return data.tenant_access_token;
 }
 
+// --- 回复消息 ---
 async function replyLark(token: string, messageId: string, text: string) {
   const res = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
     method: 'POST',
@@ -98,5 +106,6 @@ async function replyLark(token: string, messageId: string, text: string) {
     })
   });
   const data: any = await res.json();
-  console.log("发送结果:", JSON.stringify(data)); // [日志]
+  // [日志] 打印回复结果
+  console.log("📬 发送结果:", JSON.stringify(data)); 
 }
