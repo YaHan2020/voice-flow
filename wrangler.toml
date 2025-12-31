@@ -11,4 +11,5 @@ database_name = "voice-flow-db"
 database_id = "805d6455-d6ab-48d4-a5f1-0536548c37e8"
 
 [vars]
+
 LARK_VERIFICATION_TOKEN = "my-test-token"
