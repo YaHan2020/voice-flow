@@ -14,19 +14,18 @@ export default {
     try {
       const body = await request.json() as any;
 
-      // 1. 飞书握手验证
+      // 1. 飞书验证
       if (body.type === 'url_verification') {
         if (body.token !== env.LARK_VERIFICATION_TOKEN) return new Response('Invalid Token', { status: 403 });
         return new Response(JSON.stringify({ challenge: body.challenge }), { headers: { 'Content-Type': 'application/json' } });
       }
 
-      // 2. 接收消息事件
+      // 2. 接收消息
       if (body.header && body.header.event_type === 'im.message.receive_v1') {
         const messageId = body.event.message.message_id;
         const msgType = body.event.message.message_type;
         const content = JSON.parse(body.event.message.content);
         
-        // 后台处理，快速返回 200
         ctx.waitUntil(handleMessage(env, messageId, msgType, content));
         return new Response('OK', { status: 200 });
       }
@@ -40,45 +39,79 @@ export default {
 
 // --- 核心业务逻辑 ---
 async function handleMessage(env: Env, messageId: string, msgType: string, content: any) {
-  // 1. 拿 Token
   const token = await getLarkToken(env.LARK_APP_ID, env.LARK_APP_SECRET);
   if (!token) return;
 
-  // A. 如果是纯文本
-  if (msgType === 'text') {
-    // 暂时先复读，下一阶段我们将在这里接入 Llama3 做任务分类
-    await replyLark(token, messageId, `🤖 收到文本：${content.text}\n(AI 任务分析功能即将上线...)`);
-  } 
-  
-  // B. 如果是语音 (本次的核心功能！)
-  else if (msgType === 'audio') {
-    await replyLark(token, messageId, "👂 正在听取语音..."); 
+  let userText = "";
 
-    // 2. 下载语音文件
+  // 1. 获取用户输入的文字（直接文本 或 语音转录）
+  if (msgType === 'text') {
+    userText = content.text;
+  } else if (msgType === 'audio') {
+    await replyLark(token, messageId, "👂 正在听取语音...");
     const fileKey = content.file_key;
     const audioBlob = await downloadLarkFile(token, messageId, fileKey);
-
+    
     if (!audioBlob) {
-      await replyLark(token, messageId, "❌ 语音下载失败！请检查是否开通了 [im:resource:obtain] 和 [im:file] 权限并发布了版本。");
+      await replyLark(token, messageId, "❌ 语音下载失败，请检查权限。");
       return;
     }
 
-    // 3. 调用 Whisper 进行识别
+    // 调用 Whisper 转录
     try {
       const response = await env.AI.run('@cf/openai/whisper', {
         audio: [...new Uint8Array(await audioBlob.arrayBuffer())]
       });
-
-      const text = response.text;
-      
-      // 4. 返回识别结果
-      await replyLark(token, messageId, `🎙️ 语音转文字完成：\n----------------\n${text}`);
-
+      userText = response.text;
+      // 告诉用户转录结果
+      await replyLark(token, messageId, `🎙️ 转录内容：${userText}`); 
     } catch (err) {
-      await replyLark(token, messageId, `❌ AI 识别出错: ${err.message}`);
+      await replyLark(token, messageId, `❌ 语音识别出错: ${err.message}`);
+      return;
     }
   } else {
-    await replyLark(token, messageId, "暂不支持此消息类型");
+    await replyLark(token, messageId, "暂不支持此类型");
+    return;
+  }
+
+  // 2. 如果内容太短，就不分析了
+  if (!userText || userText.trim().length < 2) {
+    await replyLark(token, messageId, "🤖 这一句话太短了，我没法分析任务哦~");
+    return;
+  }
+
+  // 3. 调用 Llama-3 进行四象限分析
+  // await replyLark(token, messageId, "🧠 AI 正在分析任务..."); // (可选: 调试用)
+
+  const prompt = `
+    你是一个高效的时间管理专家。请分析用户的任务："${userText}"。
+    根据艾森豪威尔矩阵（四象限法则），将其分类为以下之一：
+    1. 【重要且紧急】(马上做)
+    2. 【重要不紧急】(计划做)
+    3. 【紧急不重要】(授权做/凑合做)
+    4. 【不紧急不重要】(不做/记下来)
+
+    请直接输出分析结果，格式要求如下：
+    ----------------
+    📊 **任务分类**：[类别名称]
+    💡 **行动建议**：[一句话建议]
+    📌 **原任务**：${userText}
+    ----------------
+    不要输出任何多余的废话，只输出上面的格式。
+  `;
+
+  try {
+    const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    const analysisResult = aiResponse.response;
+    
+    // 4. 发送最终结果
+    await replyLark(token, messageId, analysisResult);
+
+  } catch (err) {
+    await replyLark(token, messageId, `❌ AI 思考失败: ${err.message}`);
   }
 }
 
