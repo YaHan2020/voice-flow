@@ -26,8 +26,7 @@ export default {
         const msgType = body.event.message.message_type;
         const content = JSON.parse(body.event.message.content);
         
-        // 这里的 contentStr 是为了传给后台处理
-        ctx.waitUntil(handleMessage(env, messageId, msgType, content, body.event.message));
+        ctx.waitUntil(handleMessage(env, messageId, msgType, content));
         return new Response('OK', { status: 200 });
       }
 
@@ -39,46 +38,63 @@ export default {
 };
 
 // --- 核心业务逻辑 ---
-async function handleMessage(env: Env, messageId: string, msgType: string, content: any, messageEvent: any) {
-  // 1. 获取飞书 Token
+async function handleMessage(env: Env, messageId: string, msgType: string, content: any) {
+  // 1. 获取 Token
   const token = await getLarkToken(env.LARK_APP_ID, env.LARK_APP_SECRET);
-  if (!token) return;
+  if (!token) {
+    console.error("Token 获取失败");
+    return;
+  }
 
-  let finalTextInput = "";
-
-  // 2. 判断消息类型
   if (msgType === 'text') {
-    finalTextInput = content.text;
-    await replyLark(token, messageId, `📝 收到文字：${finalTextInput}\n(后续将接入 AI 进行四象限分析...)`);
+    await replyLark(token, messageId, `📝 收到文字：${content.text}`);
   
   } else if (msgType === 'audio') {
-    // 3. 处理语音：下载 -> 转录
-    await replyLark(token, messageId, "👂 正在听取语音..."); // 先给个反馈，防止用户以为没反应
+    // 2. 收到语音
+    await replyLark(token, messageId, "👂 正在下载语音..."); 
     
     const fileKey = content.file_key;
+    console.log(`开始下载文件: ${fileKey}`);
+
+    // 3. 尝试下载
     const audioBlob = await downloadLarkFile(token, messageId, fileKey);
 
-    if (audioBlob) {
-      // 4. 调用 Cloudflare Whisper 模型
-      try {
-        const response = await env.AI.run('@cf/openai/whisper', {
-          audio: [...new Uint8Array(await audioBlob.arrayBuffer())]
-        });
-        
-        finalTextInput = response.text; // 拿到转录后的文字
-        
-        // 回复转录结果
-        await replyLark(token, messageId, `🎙️ 语音转文字成功：\n"${finalTextInput}"\n(后续将接入 AI 进行任务分析)`);
-      } catch (err) {
-        await replyLark(token, messageId, `❌ AI 转录失败: ${err.message}`);
+    if (!audioBlob) {
+      // ⚠️ 如果下载失败，这里会直接告诉您原因
+      await replyLark(token, messageId, "❌ 下载语音失败！可能是权限不足或文件已过期。请查看 Cloudflare 日志。");
+      return;
+    }
+
+    // 4. 开始转录
+    try {
+      // 更新状态提示
+      // await replyLark(token, messageId, "🤖 正在进行 AI 转录..."); // 可选，调试用
+      
+      const response = await env.AI.run('@cf/openai/whisper', {
+        audio: [...new Uint8Array(await audioBlob.arrayBuffer())]
+      });
+      
+      const finalTextInput = response.text;
+      
+      if (!finalTextInput) {
+         await replyLark(token, messageId, "❌ AI 转录结果为空");
+         return;
       }
+
+      // 5. 成功返回
+      await replyLark(token, messageId, `🎙️ 识别结果：\n${finalTextInput}`);
+
+    } catch (err) {
+      console.error("AI 报错:", err);
+      // ⚠️ 如果 AI 报错，这里会把具体错误发出来
+      await replyLark(token, messageId, `❌ AI 报错: ${err.message}`);
     }
   } else {
     await replyLark(token, messageId, "暂不支持此消息类型");
   }
 }
 
-// --- 工具函数：获取 Token ---
+// --- 工具函数 ---
 async function getLarkToken(appId: string, appSecret: string) {
   const res = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
     method: 'POST',
@@ -89,7 +105,6 @@ async function getLarkToken(appId: string, appSecret: string) {
   return data.tenant_access_token;
 }
 
-// --- 工具函数：回复消息 ---
 async function replyLark(token: string, messageId: string, text: string) {
   await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
     method: 'POST',
@@ -98,9 +113,8 @@ async function replyLark(token: string, messageId: string, text: string) {
   });
 }
 
-// --- 工具函数：下载飞书资源文件 ---
+// --- 下载逻辑 (带详细报错) ---
 async function downloadLarkFile(token: string, messageId: string, fileKey: string) {
-  // 飞书下载资源的接口
   const url = `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${fileKey}?type=file`;
   
   const response = await fetch(url, {
@@ -108,7 +122,8 @@ async function downloadLarkFile(token: string, messageId: string, fileKey: strin
   });
 
   if (!response.ok) {
-    console.error("下载文件失败");
+    const errorText = await response.text();
+    console.error(`飞书下载接口报错: ${response.status} - ${errorText}`);
     return null;
   }
   return await response.blob();
