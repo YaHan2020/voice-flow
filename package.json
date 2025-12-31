@@ -1,0 +1,15 @@
+{
+  "name": "voice-flow",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240403.0",
+    "wrangler": "^3.47.0"
+  },
+  "dependencies": {
+    "@cloudflare/ai": "^1.0.53"
+  }
+}
