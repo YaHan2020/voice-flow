@@ -8,7 +8,6 @@ export interface Env {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
     if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
 
     try {
@@ -44,60 +43,57 @@ async function handleMessage(env: Env, messageId: string, msgType: string, conte
 
   let userText = "";
 
-  // 1. 获取用户输入的文字（直接文本 或 语音转录）
+  // 1. 获取文本 (支持语音转文字)
   if (msgType === 'text') {
     userText = content.text;
   } else if (msgType === 'audio') {
     await replyLark(token, messageId, "👂 正在听取语音...");
     const fileKey = content.file_key;
     const audioBlob = await downloadLarkFile(token, messageId, fileKey);
-    
     if (!audioBlob) {
       await replyLark(token, messageId, "❌ 语音下载失败，请检查权限。");
       return;
     }
-
-    // 调用 Whisper 转录
     try {
-      const response = await env.AI.run('@cf/openai/whisper', {
-        audio: [...new Uint8Array(await audioBlob.arrayBuffer())]
-      });
+      const response = await env.AI.run('@cf/openai/whisper', { audio: [...new Uint8Array(await audioBlob.arrayBuffer())] });
       userText = response.text;
-      // 告诉用户转录结果
-      await replyLark(token, messageId, `🎙️ 转录内容：${userText}`); 
+      await replyLark(token, messageId, `🎙️ 识别内容：${userText}`); 
     } catch (err) {
-      await replyLark(token, messageId, `❌ 语音识别出错: ${err.message}`);
+      await replyLark(token, messageId, `❌ 转录出错: ${err.message}`);
       return;
     }
   } else {
-    await replyLark(token, messageId, "暂不支持此类型");
-    return;
+    return; // 不支持的类型直接忽略
   }
 
-  // 2. 如果内容太短，就不分析了
-  if (!userText || userText.trim().length < 2) {
-    await replyLark(token, messageId, "🤖 这一句话太短了，我没法分析任务哦~");
-    return;
-  }
+  // 2. 获取当前时间 (关键！AI 需要知道现在是几月几号)
+  // 注意：Cloudflare 是 UTC 时间，我们手动加 8 小时变成北京时间给 AI 参考
+  const now = new Date();
+  const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19);
 
-  // 3. 调用 Llama-3 进行四象限分析
-  // await replyLark(token, messageId, "🧠 AI 正在分析任务..."); // (可选: 调试用)
-
+  // 3. AI 分析与提取 (Llama-3)
+  // 我们要求 AI 如果发现是任务，就输出 JSON 格式的时间，方便我们写日历
   const prompt = `
-    你是一个高效的时间管理专家。请分析用户的任务："${userText}"。
-    根据艾森豪威尔矩阵（四象限法则），将其分类为以下之一：
-    1. 【重要且紧急】(马上做)
-    2. 【重要不紧急】(计划做)
-    3. 【紧急不重要】(授权做/凑合做)
-    4. 【不紧急不重要】(不做/记下来)
+    当前北京时间是：${beijingTime}。
+    你是一个智能助理。请分析用户的话："${userText}"。
+    
+    如果是需要提醒的任务，请提取具体时间，并严格按照以下 JSON 格式输出：
+    {
+      "is_task": true,
+      "summary": "任务标题",
+      "start_time": "YYYY-MM-DD HH:mm:ss", 
+      "end_time": "YYYY-MM-DD HH:mm:ss",
+      "quadrant": "重要且紧急" (或其他象限)
+    }
 
-    请直接输出分析结果，格式要求如下：
-    ----------------
-    📊 **任务分类**：[类别名称]
-    💡 **行动建议**：[一句话建议]
-    📌 **原任务**：${userText}
-    ----------------
-    不要输出任何多余的废话，只输出上面的格式。
+    如果只是普通闲聊或没有具体时间，请输出：
+    {
+      "is_task": false,
+      "reply": "你的回复内容"
+    }
+
+    只输出 JSON，不要有其他废话。
+    注意：start_time 必须是基于当前时间的推算。如果不确定结束时间，默认加1小时。
   `;
 
   try {
@@ -105,25 +101,65 @@ async function handleMessage(env: Env, messageId: string, msgType: string, conte
       messages: [{ role: 'user', content: prompt }]
     });
 
-    const analysisResult = aiResponse.response;
-    
-    // 4. 发送最终结果
-    await replyLark(token, messageId, analysisResult);
+    // 清理 AI 可能输出的 Markdown 标记
+    const rawJson = aiResponse.response.replace(/```json/g, '').replace(/```/g, '').trim();
+    const result = JSON.parse(rawJson);
+
+    if (result.is_task) {
+      // 4. 创建飞书日历
+      // 将北京时间字符串转回时间戳 (简单处理)
+      const startTimeStamp = new Date(result.start_time).getTime() / 1000;
+      const endTimeStamp = new Date(result.end_time).getTime() / 1000;
+
+      // 调用飞书日历 API
+      const calendarRes = await createCalendarEvent(token, result.summary, startTimeStamp, endTimeStamp);
+      
+      if (calendarRes) {
+         await replyLark(token, messageId, `✅ 已创建日程！\n📅 **${result.summary}**\n⏰ ${result.start_time}\n📊 分类：${result.quadrant}\n(请在飞书或手机日历查看提醒)`);
+      } else {
+         await replyLark(token, messageId, `❌ 日历创建失败，可能是日期格式 AI 没算对，或者权限没发布。`);
+      }
+
+    } else {
+      // 普通回复
+      await replyLark(token, messageId, result.reply);
+    }
 
   } catch (err) {
-    await replyLark(token, messageId, `❌ AI 思考失败: ${err.message}`);
+    await replyLark(token, messageId, `❌ 处理失败: ${err.message}`);
+    console.error(err);
   }
 }
 
 // --- 助手函数 ---
+
+// 创建日历 (核心新增功能)
+async function createCalendarEvent(token: string, summary: string, startTime: number, endTime: number) {
+  // 飞书日历 API (primary 代表默认日历)
+  const res = await fetch('https://open.feishu.cn/open-apis/calendar/v4/calendars/primary/events', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      "summary": summary,
+      "start_time": { "timestamp": startTime.toString(), "timezone": "Asia/Shanghai" },
+      "end_time": { "timestamp": endTime.toString(), "timezone": "Asia/Shanghai" },
+      "reminders": [{ "minutes": 15 }] // 默认提前15分钟提醒
+    })
+  });
+  
+  if (res.status === 200) return true;
+  const err = await res.json() as any;
+  console.error("日历创建失败:", JSON.stringify(err));
+  return false;
+}
+
 async function getLarkToken(appId: string, appSecret: string) {
   const res = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ "app_id": appId, "app_secret": appSecret })
   });
-  const data: any = await res.json();
-  return data.tenant_access_token;
+  return (await res.json() as any).tenant_access_token;
 }
 
 async function replyLark(token: string, messageId: string, text: string) {
