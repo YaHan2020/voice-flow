@@ -14,5 +14,8 @@ database_id = "805d6455-d6ab-48d4-a5f1-0536548c37e8"
 
 LARK_VERIFICATION_TOKEN = "Hh2w5dJDa3dx6e7qj9eAXc2axVXrILDF"
 
+# 新增下面这两行 (填您刚才复制的)
+LARK_APP_ID = "cli_a9de11bd58b89ced" 
+LARK_APP_SECRET = "28aGYULAwQqLUjsiGZxvShXnq2MudJUs"
 
 
