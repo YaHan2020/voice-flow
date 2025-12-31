@@ -1,5 +1,3 @@
-import { Ai } from '@cloudflare/ai';
-
 export interface Env {
   AI: any;
   DB: D1Database;
@@ -8,29 +6,33 @@ export interface Env {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // 1. 只允许 POST
-    if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+    // 1. 只接受 POST 请求
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
 
-    let body: any;
     try {
-      body = await request.json();
-    } catch (e) {
-      return new Response('Invalid JSON', { status: 400 });
-    }
+      // 2. 解析飞书发来的 JSON 数据
+      const body = await request.json() as any;
 
-    // 2. 飞书 URL 验证 (Challenge)
-    if (body.type === 'url_verification') {
-      if (body.token !== env.LARK_VERIFICATION_TOKEN) {
-        return new Response('Invalid Token', { status: 403 });
+      // 3. 这里的 'url_verification' 就是飞书在问：“你在吗？暗号对不对？”
+      if (body.type === 'url_verification') {
+        // 4. 检查暗号 (Token) 是否匹配
+        if (body.token !== env.LARK_VERIFICATION_TOKEN) {
+          return new Response('Invalid Token', { status: 403 });
+        }
+        // 5. 暗号正确，把飞书给的 challenge 原样送回去，完成握手
+        return new Response(JSON.stringify({ challenge: body.challenge }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
-      return new Response(JSON.stringify({ challenge: body.challenge }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
+
+      // 这里后续会加处理消息的逻辑...
+      return new Response('OK', { status: 200 });
+
+    } catch (error) {
+      // 如果出错了，告诉我们错在哪
+      return new Response(JSON.stringify({ error: error.message }), { status: 500 });
     }
-
-    // 3. 打印日志方便调试
-    console.log('收到请求:', JSON.stringify(body));
-
-    return new Response('OK', { status: 200 });
   },
 };
